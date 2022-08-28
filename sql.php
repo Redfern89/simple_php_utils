@@ -1,331 +1,422 @@
 <?php
 
-	function SQL_query($q, $func) {
+	function WO_DB_QUERY($query) {
 		global $sql;
-		$result = -1;
-		
-		$start = microtime(true);
+		$result = 0;
 		$sql -> query('SET NAMES utf8mb4;');
-		$result = $sql -> query($q);
-		$end = microtime(true);
-		$work = $end - $start;
+		$result = $sql -> query($query);
 		
-		if (SQL_LOG) {
-			$time = date('Y-m-d H:i:s', time());
-			$log = "[$time] ($func) :: $q ($work)".PHP_EOL;
-			file_put_contents(DOCROOT . 'log/sqllog.txt', $log, FILE_APPEND | LOCK_EX);
+		if ($sql -> errno) {
+			echo $sql -> error;
+			echo '<br>';
+			echo '<b>' . $query . '</b>';
 		}
 		
-		if (DEBUG) {
-			if ($sql -> errno) {
-				die (load_tpl('dberr', array(
-					'ERR' => $sql -> error,
-					'ERRNO' => $sql -> errno
-				)));
-			}
-		}
 		return $result;
 	}
 	
-	function clean_table($table) {
-		return SQL_query('TRUNCATE `' . $table . '`', 'clean_table');
+	function WO_DB_EscapeString($string) {
+		global $sql;
+		return $sql -> real_escape_string($string);
 	}
 	
-	function getRow($table, $fields, $by_fields='*', $logic = 'AND') {
-		global $sql;
-		$table = $sql -> real_escape_string($table);
-		$logic = $sql -> real_escape_string($logic);
-		$logic = (in_array($logic, ['AND', 'OR']) ? $logic : 'AND');
-		$where_conditions = '';
-		$by_fields_collection = array();
-		$fields_collection = array();
-		$result = array();
-
-		$fields = ($fields != '*') ? explode(',', $fields) : '*';
-		if (is_array($fields)) {
-			if (!empty($fields)) {
-				for ($i = 0; $i < count($fields); $i++) {
-					$field = $sql -> real_escape_string($fields[$i]);
-					$fields_collection[] = "`$table`.`$field`";
-				}
-				$fields_collection = implode(', ', $fields_collection);
-			}
-		}
-		if (is_string($fields) && $fields == '*') $fields_collection = "`$table`.*";
-
-		if (is_array($by_fields)) {
-			if (!empty($by_fields)) {
-				for ($i = 0; $i < count($by_fields); $i++) {
-					$by_field = $sql -> real_escape_string($by_fields[$i][0]);
-					$by_field_value = $sql -> real_escape_string($by_fields[$i][2]);
-					$compare_logic = $sql -> real_escape_string($by_fields[$i][1]);
-					$compare_logic = (in_array($compare_logic, ['=', '!=', '>', '<', '>=', '<=']) ? $compare_logic : '=');
+	function WO_DB_CleanTable($table) {
+		return WO_DB_QUERY('TRUNCATE `' . WO_DB . '`.`' . WO_DB_EscapeString($table) . '`;');
+	}
+	
+	function WO_DB_CreateWhere($table, $conditions, $summary_logic='AND') {
+		$where_collection = array();
+		
+		$compare_types = ['=', '>', '<', '>=', '<=', 'IN', 'IS', '!=', 'LIKE', 'REGEXP'];
+		$condition_types = ['OR', 'AND'];
+		
+		$table = WO_DB_EscapeString($table);
+		$table = '`' . WO_DB . "`.`$table`";
+		
+		if ($conditions != '*') {
+			foreach ($conditions as $condition) {
+				$field = WO_DB_EscapeString($condition[0]);
+				
+				if ($field != 'expr:') {
+					$logic = (in_array($condition[1], $compare_types)) ? $condition[1] : '=';
+					$value = WO_DB_EscapeString($condition[2]);
 					
-					$by_fields_collection[] = "`$table`.`$by_field` $compare_logic '$by_field_value'";
+					if ($logic !== 'IN') {
+						if (is_numeric($value)) {
+							$where_collection[] = "$table.`$field` $logic $value";
+						} else if (is_string($value)) {
+							if ($value != 'NULL') {
+								$where_collection[] = "$table.`$field` $logic '$value'";
+							} else {
+								$where_collection[] = "$table.`$field` $logic NULL";
+							}
+						}
+					} else {
+						$value = explode(',', $value);
+						$in_conditions = array();
+						foreach ($value as $fvalue) {
+							if (is_numeric($fvalue)) {
+								$in_conditions[] = (int)$fvalue;
+							} else if (is_string($fvalue)) {
+								$in_conditions[] = "'" . WO_DB_EscapeString($fvalue) . "'";
+							}
+						}
+						$where_collection[] = "$table.`$field` IN (" . implode(',', $in_conditions) . ')';
+					}
+				} else {
+					$expr = WO_DB_EscapeString($condition[1]);
+					$expr = str_replace('%table%', $table, $expr);
+					$where_collection[] = $expr;
 				}
-				$by_fields_collection = implode(" $logic ", $by_fields_collection);
+				
+			}
+			
+			$where = '(' . implode(" $summary_logic ", $where_collection) . ')';
+		} else {
+			$where = '1';
+		}
+		
+		return $where;
+	}
+	
+	function WO_DB_CreateLimit($offset=0, $count=0) {
+		$limit = '';
+		
+		$offset = (int)$offset;
+		$count = (int)$count;
+		
+		if ($offset != 0 && $count != 0) {
+			$limit = "LIMIT $offset, $count";
+		} else if ($count != 0 && $offset == 0) {
+			$limit = "LIMIT $count";
+		} else if ($offset == 0 && $count == 0) {
+			$limit = '';
+		}
+		
+		return $limit;
+	}
+	
+	function WO_DB_CreateGroup($table, $fields) {
+		$table = WO_DB_EscapeString($table);
+		$groupby_collection = array();
+		
+		if (!empty($fields)) {
+			$fields = explode(',', $fields);
+			foreach ($fields as $field) {
+				$field = WO_DB_EscapeString($field);
+				
+				$groupby_collection[] = '`' . WO_DB . "`.`$table`.`$field`";
+			}
+			
+			return 'GROUP BY (' . implode(', ', $groupby_collection) . ')';
+		} else {
+			return '';
+		}
+	}
+	
+	function WO_DB_CreateOrder($table, $fields) {
+		$table = WO_DB_EscapeString($table);
+		$order_collection = array();
+		
+		if (!empty($fields)) {
+			foreach ($fields as $field) {
+				$order_field = WO_DB_EscapeString($field[0]);
+				$order_type = in_array($field[1], ['ASC', 'DESC', 'rand']) ? $field[1] : 'ASC';
+				
+				if ($order_field == 'rand') {
+					$order_collection[] = "rand() $order_type";
+				} else {
+					if (preg_match('/length\//', $order_field)) {
+						preg_match('/length\/(.*)/isu', $order_field, $found);
+						$order_collection[] = 'LENGTH(`' . WO_DB . "`.`$table`.`{$found[1]}`), {$found[1]} $order_type";
+					} else {
+						$order_collection[] = '`' . WO_DB . "`.`$table`.`$order_field` $order_type";
+					}
+				}
+			}
+			
+			return 'ORDER BY ' . implode(', ', $order_collection);
+		} else {
+			return '';
+		}
+	}
+	
+	function WO_DB_SelectTableFields($table, $fields) {
+		$table = WO_DB_EscapeString($table);
+		$fields_collection = array();
+		$fields = ($fields != '*') ? explode(',', $fields) : '*';
+		
+		if (is_array($fields)) {
+			foreach($fields as $field) {
+				$field = WO_DB_EscapeString($field);
+				$fields_collection[] = '`' . WO_DB . "`.`$table`.`$field`";
+			}
+		} else {
+			$fields_collection[] = '`' . WO_DB . "`.`$table`.*";
+		}
+		
+		return implode(', ', $fields_collection);
+	}
+	
+	function WO_DB_UpdateFields($table, $fields) {
+		$table = WO_DB_EscapeString($table);
+		$update_collection = array();
+		
+		if (!empty($fields)) {
+			foreach($fields as $field => $value) {
+				$field = WO_DB_EscapeString($field);
+				$value = WO_DB_EscapeString($value);
+				
+				if (preg_match('/expr:/', $value)) {
+					preg_match('/expr:(.*)/', $value, $found);
+					if (isset($found[1])) {
+						$update_collection[] = '`' . WO_DB . "`.`$table`.`$field` = {$found[1]}";
+					}
+				} else {
+					if ($value != 'NULL') {
+						$update_collection[] = '`' . WO_DB . "`.`$table`.`$field` = '$value'";
+					} else {
+						$update_collection[] = '`' . WO_DB . "`.`$table`.`$field` = NULL";
+					}
+				}
 			}
 		}
-		if (is_string($by_fields) && $by_fields == '*') $by_fields_collection = '1';
-		$where_conditions = "WHERE ($by_fields_collection)";
 		
-		$q = "SELECT $fields_collection FROM `$table` $where_conditions;";
-		$ch = SQL_query($q, 'getRow');
+		return implode(', ', $update_collection);
+	}
+	
+    function WO_DB_Create_MatchAgainst($table, $words, $cells_data, $between_cells_logic='OR') {
+        $match_expr = array();
+        $cells_expr = array();
+        $words = strlen($words) ? explode(' ', $words) : [];
+        
+        if (count($words)) {
+            for ($i = 0; $i < count($cells_data); $i++) {
+                $cell_logic = $cells_data[$i][1];
+                $cells = explode(',', $cells_data[$i][0]);
+                
+                for ($j = 0; $j < count($cells); $j++) {
+                    
+                    if (count($words)) {
+                        for ($x = 0; $x < count($words); $x++) {
+                            $word = WO_DB_EscapeString($words[$x]);
+							$match_expr[$i][] = "(MATCH `$table`.`{$cells[$j]}` AGAINST ('$word*' IN BOOLEAN MODE))"; 
+                        }
+                    }
+                    $cells_expr[] = '(' . implode(" $cell_logic ", $match_expr[$i]) . ')';
+                
+                }
+                
+            }
+            return '(' . implode(" $between_cells_logic ", $cells_expr) . ')';
+
+        } else {
+            return '1';
+        }
+    }
+	
+	function WO_DB_Create_Taxonomy2($table, $data) {
+		$table				= WO_DB_EscapeString($table);
+		$table				= '`' . WO_DB . "`.`$table`";
+		$join_collection	= array();
 		
-		if (!$sql -> errno) {
-			$result = $ch -> fetch_assoc();
-			$ch -> close();			
+		if (!empty($data)) {
+			for ($i = 0; $i < count($data); $i++) {
+				if (!empty($data[$i])) {
+					$jointable	= WO_DB_EscapeString($data[$i][0]);
+					$terms		= WO_DB_EscapeString($data[$i][1]);
+					$terms		= explode(',', $terms);
+					$obj_type	= WO_DB_EscapeString($data[$i][2]);
+					$terms_cnt	= 0;
+					
+					if (!empty($terms)) {
+						for ($j = 0; $j < count($terms); $j++) {
+							$c = count($join_collection);
+							$join_collection[] = 'JOIN `' . TTAXONOMY . "` AS `tt$c` ON `tt$c`.`object_id` = $table.`id` AND `tt$c`.`obj_type` = '$obj_type' JOIN `$jointable` AS `t$c` ON `tt$c`.`term_id` = `t$c`.`id` AND `t$c`.`name` = '{$terms[$j]}'";
+						}
+					}
+				}
+			}
+			
+			return implode(' ', $join_collection);
+		}
+	}
+	
+	function WO_DB_Taxonomy($table, $jointable, $terms, $obj_type, $logic) {		
+		$table		=	WO_DB_EscapeString($table);
+		$jointable	=	WO_DB_EscapeString($jointable);
+		$obj_type	=	WO_DB_EscapeString($obj_type);
+		$logic		=	WO_DB_EscapeString($logic);
+		
+		$terms_collection		= array();
+		$join_expr_collection	= array();
+		$terms_expr_collection	= array();
+		
+		$result = '';
+		
+		if (!empty($terms)) {
+			$terms_collection = explode(',', $terms);
+			
+			if ($logic == 'AND') {
+				for ($i = 0; $i < count($terms_collection); $i++) {
+					$term = WO_DB_EscapeString($terms_collection[$i]);
+					$join_expr_collection[] = 'JOIN `' . TTAXONOMY . "` AS `tt$i` ON `tt$i`.`object_id` = `$table`.`id` AND `tt$i`.`obj_type` = '$obj_type' JOIN `$jointable` AS `t$i` ON `t$i`.`id` = `tt$i`.`term_id` AND `t$i`.`name` = '$term'";
+				}
+				$result = implode(' ', $join_expr_collection);
+			} else if ($logic == 'OR') {
+				for ($i = 0; $i < count($terms_collection); $i++) {
+					$term = WO_DB_EscapeString($terms_collection[$i]);
+					$terms_expr_collection[] = "'$term'";
+				}
+				$result = 'JOIN `' . TTAXONOMY . '` ON `' . TTAXONOMY . '`.`object_id` = `' . $table . '`.`id` AND `' . TTAXONOMY . '`.`obj_type` = \'' . $obj_type . '\' JOIN `' . $jointable . '` ON `' . TTAXONOMY . '`.`term_id` = `' . $jointable . '`.`id` AND `' . $jointable . '`.`name` IN (' . implode(',', $terms_expr_collection) . ')';
+			}
 		}
 		
 		return $result;
 	}	
 	
-	function getRows($table, $fields='*', $by_fields='*', $logic='AND', $order_by='', $order_type='ASC', $limit_start='', $limit_count='', $group_by='') {
-		global $sql;
-		$table = $sql -> real_escape_string($table);
-		$order_by = $sql -> real_escape_string($order_by);
-		$order_type = $sql -> real_escape_string($order_type);
-		$logic = (in_array($logic, ['AND', 'OR']) ? $logic : 'AND');
-		$order_type = (in_array($order_type, ['ASC', 'DESC']) ? $order_type : 'ASC');
-		$group_by = $sql -> real_escape_string($group_by);
-		$limit_start = $sql -> real_escape_string($limit_start);
-		$limit_count = $sql -> real_escape_string($limit_count);
-		
-		$fields_collection = array();
-		$by_fields_collection = array();
-		$where_conditions = '';
-		$order_conditions = '';
-		$limit_conditions = '';
-		$group_conditions = '';
-		
+	function WO_DB_GetRows($table, $fields='*', $where='*', $callback=null, $summary_logic='AND', $order='', $group='', $offset=0, $count=0) {
 		$result = array();
 		
-		$fields = ($fields != '*') ? explode(',', $fields) : '*';
-		if (is_array($fields)) {
-			if (!empty($fields)) {
-				for ($i = 0; $i < count($fields); $i++) {
-					$field = $sql -> real_escape_string($fields[$i]);
-					$fields_collection[] = "`$table`.`$field`";
-				}
-				$fields_collection = implode(', ', $fields_collection);
-			}
-		}
-		if (is_string($fields) && $fields == '*') $fields_collection = "`$table`.*";
+		$table = WO_DB_EscapeString($table);
+		$fields = WO_DB_SelectTableFields($table, $fields);
+		$where = WO_DB_CreateWhere($table, $where, $summary_logic);
+		$order = WO_DB_CreateOrder($table, $order);
+		$group = WO_DB_CreateGroup($table, $group);
+		$limit = WO_DB_CreateLimit($offset, $count);
 		
-		if (is_array($by_fields)) {
-			if (!empty($by_fields)) {
-				for ($i = 0; $i < count($by_fields); $i++) {
-					$by_field = $sql -> real_escape_string($by_fields[$i][0]);
-					$by_field_value = $sql -> real_escape_string($by_fields[$i][2]);
-					$compare_logic = $sql -> real_escape_string($by_fields[$i][1]);
-					$compare_logic = (in_array($compare_logic, ['=', '!=', '>', '<', '>=', '<=', 'IN', 'LIKE', 'REGEXP']) ? $compare_logic : '=');
-					
-					if ($compare_logic != 'IN') {
-
-						$by_fields_collection[] = "`$table`.`$by_field` $compare_logic '$by_field_value'";
-					} else if ($compare_logic == 'IN') {
-						$by_field_value_collection = array();
-						$by_field_value = explode(',', $by_field_value);
-						
-						if (!empty($by_field_value)) {
-							for ($j = 0; $j < count($by_field_value); $j++) {
-								$by_field_value_current = $sql -> real_escape_string($by_field_value[$j]);
-								if (is_string($by_field_value_current)) {
-									$by_field_value_collection[] = "'$by_field_value_current'";
-								} else if (is_numeric($by_field_value_current)) {
-									$by_field_value_collection[] = $by_field_value;
-								}
-							}
-							$by_field_value = implode(',', $by_field_value_collection);
-						}
-						$by_fields_collection[] = "`$table`.`$by_field` $compare_logic ($by_field_value)";
-					}
-				}
-				$by_fields_collection = implode(" $logic ", $by_fields_collection);
-			}
-		}
-		if (is_string($by_fields) && $by_fields == '*') $by_fields_collection = '1';
-		$where_conditions = "WHERE ($by_fields_collection)";
-	
-		if (!empty($order_by)) {
-			if ($order_by == 'rand()') {
-				$order_conditions = "ORDER BY rand() $order_type";
-			} else if (preg_match('/length\//', $order_by)) {
-				preg_match('/length\/(.*)/isu', $order_by, $found);
-				$order_by = $found[1];
-				$order_conditions = "ORDER BY LENGTH(`$table`.`$order_by`), $order_by";
+		$q = "SELECT SQL_CALC_FOUND_ROWS $fields FROM `$table` WHERE $where $order $group $limit;";
+		$ch = WO_DB_QUERY($q);
+		
+		while ($sql_result = $ch -> fetch_assoc()) {
+			if (isset($callback) && is_callable($callback)) {
+				$callback($sql_result);
 			} else {
-				$order_conditions = "ORDER BY `$table`.`$order_by` $order_type";
-			}
-		}
-		
-		if (!empty($group_by)) {
-			$group_conditions = "GROUP BY `$table`.`$group_by`";
-		}
-		
-		if (!empty($limit_count)) {
-			$limit_conditions = "LIMIT $limit_start, $limit_count";
-		}
-		
-		$q = "SELECT SQL_CALC_FOUND_ROWS $fields_collection FROM `$table` $where_conditions $group_conditions $order_conditions $limit_conditions;";
-
-		$ch = SQL_query($q, 'getFields');
-		if (!$sql -> errno) {
-			while ($sql_result = $ch -> fetch_assoc()) {
 				$result[] = $sql_result;
 			}
 		}
 		
+		$ch -> close();
+		
 		return $result;
 	}
 	
-	function getField($table, $field, $by_fields='*', $logic = 'AND') {
-		global $sql;
-		$table = $sql -> real_escape_string($table);
-		$field = $sql -> real_escape_string($field);
-		$logic = $sql -> real_escape_string($logic);
-		$logic = (in_array($logic, ['AND', 'OR']) ? $logic : 'AND');
-		$by_fields_collection = array();
-		$where_conditions = '';
+	function WO_DB_GetRow($table, $fields='*', $where='*', $callback=null, $summary_logic='AND') {
+		$result = array();
+		
+		$table = WO_DB_EscapeString($table);
+		$fields = WO_DB_SelectTableFields($table, $fields);
+		$where = WO_DB_CreateWhere($table, $where, $summary_logic);
+		$limit = WO_DB_CreateLimit(0, 1);
+		
+		$q = "SELECT $fields FROM `$table` WHERE $where $limit;";
+		$ch = WO_DB_QUERY($q);
+		
+		while ($sql_result = $ch -> fetch_assoc()) {
+			if (isset($callback)) {
+				$callback($sql_result);
+			} else {
+				$result = $sql_result;
+			}
+		}
+		
+		$ch -> close();
+		
+		return $result;		
+	}
+	
+	function WO_DB_GetField($table, $field, $where='*', $summary_logic='AND') {
 		$result = '';
-
-		if (is_array($by_fields)) {
-			if (!empty($by_fields)) {
-				for ($i = 0; $i < count($by_fields); $i++) {
-					$by_field = $sql -> real_escape_string($by_fields[$i][0]);
-					$by_field_value = $sql -> real_escape_string($by_fields[$i][2]);
-					$compare_logic = $sql -> real_escape_string($by_fields[$i][1]);
-					$compare_logic = (in_array($compare_logic, ['=', '!=', '>', '<', '>=', '<=']) ? $compare_logic : '=');
-					
-					$by_fields_collection[] = "`$table`.`$by_field` $compare_logic '$by_field_value'";
-				}
-				$by_fields_collection = implode(" $logic ", $by_fields_collection);
-			}
-		}
-		if (is_string($by_fields) && $by_fields == '*') $by_fields_collection = '1';
-		$where_conditions = "WHERE ($by_fields_collection)";
+		$table = WO_DB_EscapeString($table);
+		$fields = WO_DB_SelectTableFields($table, $field);
+		$where = WO_DB_CreateWhere($table, $where, $summary_logic);
+		$limit = WO_DB_CreateLimit(0, 1);
 		
-		$q = "SELECT `$table`.`$field` FROM `$table` $where_conditions;";
-		$ch = SQL_query($q, 'getField');
-		
-		if (!$sql -> errno) {
-			$sql_result = $ch -> fetch_assoc();
-			$ch -> close();			
-			$result = (isset($sql_result[$field]) ? $sql_result[$field] : null);
-		}
+		$q = "SELECT $fields FROM `$table` WHERE $where $limit;";
+		$ch = WO_DB_QUERY($q);
+		$sql_result = $ch -> fetch_assoc();
+		$ch -> close();
+	
+		$result = isset($sql_result[$field]) ? $sql_result[$field] : '';
 		
 		return $result;
 	}
 	
-	function getCount($table, $field, $by_fields='*', $logic = 'AND') {
-		global $sql;
-		$table = $sql -> real_escape_string($table);
-		$field = $sql -> real_escape_string($field);
-		$logic = $sql -> real_escape_string($logic);
-		$logic = (in_array($logic, ['AND', 'OR']) ? $logic : 'AND');
-		$by_fields_collection = array();
-		$where_conditions = '';
-		$result = -1;
-
-		if (is_array($by_fields)) {
-			if (!empty($by_fields)) {
-				for ($i = 0; $i < count($by_fields); $i++) {
-					$by_field = $sql -> real_escape_string($by_fields[$i][0]);
-					$by_field_value = $sql -> real_escape_string($by_fields[$i][2]);
-					$compare_logic = $sql -> real_escape_string($by_fields[$i][1]);
-					$compare_logic = (in_array($compare_logic, ['=', '!=', '>', '<', '>=', '<=']) ? $compare_logic : '=');
-					
-					$by_fields_collection[] = "`$table`.`$by_field` $compare_logic '$by_field_value'";
-				}
-				$by_fields_collection = implode(" $logic ", $by_fields_collection);
-			}
-		}
-		if (is_string($by_fields) && $by_fields == '*') $by_fields_collection = '1';
-		$where_conditions = "WHERE ($by_fields_collection)";
+	function WO_DB_GetCount($table, $field='id', $where='*', $summary_logic='AND') {
+		$result = '';
+		$table = WO_DB_EscapeString($table);
+		$field = WO_DB_EscapeString($field);
+		$where = WO_DB_CreateWhere($table, $where, $summary_logic);
 		
-		$q = "SELECT COUNT(`$table`.`$field`) AS `count` FROM `$table` $where_conditions;";
-		$ch = SQL_query($q, 'getCount');
+		$q = 'SELECT COUNT(`' . WO_DB . "`.`$table`.`$field`) AS `count` FROM `$table` WHERE $where;";
+		$ch = WO_DB_QUERY($q);
+		$sql_result = $ch -> fetch_assoc();
+		$ch -> close();
+	
+		$result = isset($sql_result['count']) ? (int)$sql_result['count'] : 0;
 		
-		if (!$sql -> errno) {
-			$sql_result = $ch -> fetch_assoc();
-			$ch -> close();			
-			$result = (int)(isset($sql_result['count']) ? $sql_result['count'] : -1);
-		}
-		
-		return $result;
+		return $result;		
 	}
 	
-	function getSum($table, $file, $field, $by_fields='*', $logic = 'AND') {
-		global $sql;
-		$table = $sql -> real_escape_string($table);
-		$field = $sql -> real_escape_string($field);
-		$logic = $sql -> real_escape_string($logic);
-		$logic = (in_array($logic, ['AND', 'OR']) ? $logic : 'AND');
-		$by_fields_collection = array();
-		$where_conditions = '';
-		$result = -1;
-
-		if (is_array($by_fields)) {
-			if (!empty($by_fields)) {
-				for ($i = 0; $i < count($by_fields); $i++) {
-					$by_field = $sql -> real_escape_string($by_fields[$i][0]);
-					$by_field_value = $sql -> real_escape_string($by_fields[$i][2]);
-					$compare_logic = $sql -> real_escape_string($by_fields[$i][1]);
-					$compare_logic = (in_array($compare_logic, ['=', '!=', '>', '<', '>=', '<=']) ? $compare_logic : '=');
-					
-					$by_fields_collection[] = "`$table`.`$by_field` $compare_logic '$by_field_value'";
-				}
-				$by_fields_collection = implode(" $logic ", $by_fields_collection);
-			}
-		}
-		if (is_string($by_fields) && $by_fields == '*') $by_fields_collection = '1';
-		$where_conditions = "WHERE ($by_fields_collection)";
+	function WO_DB_Update($table, $fields, $where='*', $summary_logic='AND') {
+		$table = WO_DB_EscapeString($table);
+		$fields = WO_DB_UpdateFields($table, $fields);
+		$where = WO_DB_CreateWhere($table, $where, $summary_logic);
 		
-		$q = "SELECT SUM(`$table`.`$field`) AS `sum` FROM `$table` $where_conditions;";
-		echo $q;
-		$ch = SQL_query($q, $file, 'getField');
+		$q = "UPDATE `$table` SET $fields WHERE $where";
 		
-		if (!$sql -> errno) {
-			$sql_result = $ch -> fetch_assoc();
-			$ch -> close();			
-			$result = (float)(isset($sql_result['sum']) ? $sql_result['sum'] : -1);
-		}
-		
-		return $result;
+		WO_DB_QUERY($q);
 	}
 	
-	function insertFields($table, $fields) {
+	function WO_DB_Delete($table, $where, $summary_logic='AND') {
+		$table = WO_DB_EscapeString($table);
+		$where = WO_DB_CreateWhere($table, $where, $summary_logic);
+		
+		$q = "DELETE FROM `$table` WHERE $where;";
+		WO_DB_QUERY($q);
+	}
+	
+	function WO_DB_Insert($table, $fields, $echo=FALSE) {
 		global $sql;
-		$insert_rowsNames = array();
-		$insert_rowsValues = array();
-		$table = $sql -> real_escape_string($table);
+		
+		$table = WO_DB_EscapeString($table);
+		$rows_collection = array();
+		$fields_collection = array();
 		
 		if (!empty($fields)) {
-			foreach ($fields as $field => $value) {
+			foreach($fields as $field => $value) {
+				$field = WO_DB_EscapeString($field);
+				$value = WO_DB_EscapeString($value);
 				
-				if (!empty($value) && !is_null($value)) $value_field = "'{$sql -> real_escape_string($value)}'";
-				else $value_field = 'NULL';				
-				
-				$insert_rowsNames[] = '`' . $sql -> real_escape_string($field) . '`';
-				$insert_rowsValues[] = $value_field;
+				if (empty($value)) {
+					$rows_collection[] = '0';
+				}else if (is_integer($value) && $value == 0) {
+					$rows_collection[] = '0';
+				} else if ($value == 'NULL') {
+					$rows_collection[] = 'NULL';
+				} else {
+					$rows_collection[] = "'$value'";
+				}
+
+				$fields_collection[] = "`$field`";
 			}
-			$insert_rowsNames = implode(',', $insert_rowsNames);
-			$insert_rowsValues = implode(',', $insert_rowsValues);
-			
-			$q = "INSERT INTO `$table` ($insert_rowsNames) VALUES ($insert_rowsValues);";
-			SQL_query($q, 'insertFields');
 		}
 		
+		$q = 'INSERT INTO `' . WO_DB . "`.`$table` (" . implode(', ', $fields_collection) . ') VALUES (' . implode(', ', $rows_collection) . ')';
+		if (!$echo) {
+			WO_DB_QUERY($q);
+		} else {
+			echo $q;
+		}
 		return $sql -> insert_id;
 	}
 	
-	function insertManyFields($table, $fields) {
-		global $sql;
+	function WO_DB_InsertMany($table, $fields) {
 		$insert_values_per_field_collection = array();
 		$insert_keys_per_field_collection = array();
 		$insert_values_collection = '';
 		$insert_keys_collection = '';
-		$table = $sql -> real_escape_string($table);
+		$table = WO_DB_EscapeString($table);
 		$insert_collection = array();
 		
 		if (!empty($fields)) {
@@ -334,8 +425,8 @@
 				
 				if (!empty($fields_collection_arr)) {
 					foreach ($fields_collection_arr as $key => $value) {
-						$value = $sql -> real_escape_string($value);
-						$key = $sql -> real_escape_string($key);
+						$value = WO_DB_EscapeString($value);
+						$key = WO_DB_EscapeString($key);
 						
 						if (is_numeric($value)) {
 							$insert_values_per_field_collection[] = "$value";
@@ -353,132 +444,53 @@
 					$insert_keys_per_field_collection = [];
 				}
 			}
-			$q = "INSERT INTO `$table` ($insert_keys_collection) VALUES " . implode(',', $insert_collection);
-			SQL_query($q, 'insertManyFields');
+			$q = 'INSERT INTO `' . WO_DB . "`.`$table` ($insert_keys_collection) VALUES " . implode(',', $insert_collection);
+			WO_DB_QUERY($q);
 		}
 	}
 	
-	function updateFields($table, $fields, $by_fields='*', $logic='AND') {
-		global $sql;
-		$table = $sql -> real_escape_string($table);
-		$logic = $sql -> real_escape_string($logic);
-		$logic = (in_array($logic, ['AND', 'OR']) ? $logic : 'AND');
-		$update_collection = array();
-		$by_fields_collection = array();
-		$where_conditions = '';
-		$update_conditions = '';
-		
-		if (is_array($fields) && !empty($fields)) {
-			foreach ($fields as $field => $value) {
-				$field = $sql -> real_escape_string($field);
-				$value = $sql -> real_escape_string($value);
-				$update_collection[] = "`$table`.`$field` = '$value'";
-			}
-			$update_collection = implode(', ', $update_collection);
-			$update_conditions = "SET $update_collection";
-		}
-		
-		if (is_array($by_fields)) {
-			if (!empty($by_fields)) {
-				for ($i = 0; $i < count($by_fields); $i++) {
-					$by_field = $sql -> real_escape_string($by_fields[$i][0]);
-					$by_field_value = $sql -> real_escape_string($by_fields[$i][2]);
-					$compare_logic = $sql -> real_escape_string($by_fields[$i][1]);
-					$compare_logic = (in_array($compare_logic, ['=', '!=', '>', '<', '>=', '<=']) ? $compare_logic : '=');
-					
-					$by_fields_collection[] = "`$table`.`$by_field` $compare_logic '$by_field_value'";
-				}
-				$by_fields_collection = implode(" $logic ", $by_fields_collection);
-			}
-		}
-		if (is_string($by_fields) && $by_fields == '*') $by_fields_collection = '1';
-		$where_conditions = "WHERE ($by_fields_collection)";
-		
-		$q = "UPDATE `$table` $update_conditions $where_conditions;";
-		SQL_query($q, 'updateFields');
-	}
-	
-	function deleteFields($table, $by_fields, $logic='AND') {
-		global $sql;
-		$table = $sql -> real_escape_string($table);
-		$logic = $sql -> real_escape_string($logic);
-		$logic = (in_array($logic, ['AND', 'OR']) ? $logic : 'AND');
-		$update_collection = array();
-		$by_fields_collection = array();
-		$where_conditions = '';
-		
-		if (is_array($by_fields)) {
-			if (!empty($by_fields)) {
-				for ($i = 0; $i < count($by_fields); $i++) {
-					$by_field = $sql -> real_escape_string($by_fields[$i][0]);
-					$by_field_value = $sql -> real_escape_string($by_fields[$i][2]);
-					$compare_logic = $sql -> real_escape_string($by_fields[$i][1]);
-					$compare_logic = (in_array($compare_logic, ['=', '!=', '>', '<', '>=', '<=']) ? $compare_logic : '=');
-					
-					$by_fields_collection[] = "`$table`.`$by_field` $compare_logic '$by_field_value'";
-				}
-				$by_fields_collection = implode(" $logic ", $by_fields_collection);
-			}
-		}
-		if (is_string($by_fields) && $by_fields == '*') $by_fields_collection = '1';
-		$where_conditions = "WHERE ($by_fields_collection)";
-		
-		$q = "DELETE FROM `$table` $where_conditions;";
-		SQL_query($q, 'deleteFields');
-	}
-	
-	function getFoundRows() {
-		$ch = SQL_query('SELECT FOUND_ROWS() AS `found`;', 'get_found_rows');
+	function WO_DB_FoundRows() {
+		$ch = WO_DB_QUERY('SELECT FOUND_ROWS() AS `found`;');
 
 		$result = array();
 		$result = $ch -> fetch_assoc();
 		$ch -> close();
 		
-		return (int)$result['found'];		
+		return (int)$result['found'];
 	}
 	
-	function rowExists($table, $field, $value) {
-		return getField($table, $field, array([$field, '=', $value])) == $value;
+	function WO_DB_RowExists($table, $field, $value) {
+		return WO_DB_GetField($table, $field, array([$field, '=', $value])) == $value;
 	}
 	
-	function getDelimitedList($table, $file, $field, $by_fields='*', $delimiter=',') {
-		$res = getRows($table, $file, $field, $by_fields);
+	function WO_DB_RowMatch($table, $fields) {
+		return !empty(WO_DB_GetRow($table, '*', $fields)) ? true : false;
+	}
+	
+	function WO_DB_AssocArray($table, $field, $value, $fields='*', $where='*', $callback=null, $summary_logic='AND', $order='', $group='', $offset=0, $count=0) {
 		$result = array();
 		
-		if (!empty($res)) {
-			for ($i = 0; $i < count($res); $i++) {
-				$result[] = $res[$i][$field];
-			}
-			$result = implode($delimiter, $result);
+		$rows = WO_DB_GetRows($table, $fields, $where, null, 'AND', $order, $group, $offset, $count);
+		foreach ($rows as $row) {
+			$result[$row[$field]] = $row[$value];
 		}
 		
 		return $result;
 	}
 	
-	function assocArrayByField($table, $field, $value, $by_fields='*', $logic='AND', $order_by='', $order_type='ASC', $limit_start='', $limit_count='', $group_by='') {
-		$fields = "$field,$value";
-		$res = getRows($table, $fields, $by_fields, $logic, $order_by, $order_type, $limit_start, $limit_count, $group_by);
+	function WO_DB_GetArray($table, $field, $where='*', $summary_logic='AND', $order=null, $group=null, $offset=0, $count=0) {
 		$result = array();
+		//function WO_DB_GetRows($table, $fields='*', $where='*', $callback=null, $summary_logic='AND', $order='', $group='', $offset=0, $count=0) {
+		$rows = WO_DB_GetRows($table, $field, $where);//, null, $summary_logic, $order, $group, $offset, $count);
 		
-		if (!empty($res)) {
-			for ($i = 0; $i < count($res); $i++) {
-				$result[$res[$i][$field]] = $res[$i][$value];
-			}
+		foreach ($rows as $row) {
+			$result[] = $row[$field];
 		}
 		
-		return $result;
+		return $result;		
 	}
-
-	function getSepFieldsByField($table, $field, $by_fields='*', $sep=',', $logic='AND', $order_by='', $order_type='ASC', $limit_start='', $limit_count='', $group_by='') {
-		$fields_collection = getRows($table, $field, $by_fields, $logic, $order_by, $order_type, $limit_start, $limit_count, $group_by);
-		$result = array();
-		
-		if (!empty($fields_collection)) {
-			for ($i = 0; $i < count($fields_collection); $i++) {
-				$result[] = $fields_collection[$i][$field];
-			}
-		}
-		
-		return implode($sep, $result);
+	
+	function WO_DB_GetDelimitedList($table, $field, $delimiter=',', $where='*', $summary_logic='AND', $order=null, $group=null, $offset=0, $count=0) {
+		return implode($delimiter, WO_DB_GetArray($table, $field, $where));//, null, 'AND', $order, $group, $offset, $count));
 	}
 ?>
