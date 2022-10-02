@@ -21,15 +21,103 @@
 		}
 	}
 
-	function generate_string($length=10, $count=1, $set='eng,num,rus', $chars='', $sep='', $to_md5=false) {
+	function map($x, $in_min, $in_max, $out_min, $out_max) {
+		return ($x - $in_min) * ($out_max - $out_min) / ($in_max - $in_min) + $out_min;
+	}
+	
+	function constrain($amt, $min, $max) {
+		return $amt < $min ? $min : ($amt > $max ? $max : $amt);
+	}
+	
+	function contrast_color($color) {
+		$r = (int)(($color >> 16) & 0xFF);
+		$g = (int)(($color >> 8) & 0xFF);
+		$b = (int)($color & 0xFF);
+		
+		$contrast = (($r * 299) + ($g * 587) + ($b * 114)) / 1000;
+		return ($contrast >= 125) ? 0x000000 : 0xFFFFFF;
+	}
+	
+	function contrast_color_auto($color) {
+		$r = (int)(($color >> 16) & 0xFF);
+		$g = (int)(($color >> 8) & 0xFF);
+		$b = (int)($color & 0xFF);
+
+		$cmin = min($r, $g, $b);
+		$cmax = max($r, $g, $b);
+		$delta = $cmax - $cmin;
+		
+		if ($delta === 0) {
+			$hue = 0;
+		} elseif ($cmax == $r) {
+			$hue = (($g - $b) / $delta) % 6;
+		} elseif ($cmax == $g) {
+			$hue = ($b - $r) / $delta + 2;
+		} else {
+			$hue = ($r - $g) / $delta + 4;
+		}
+		
+		$hue = round($hue * 60);
+		if ($hue < 0) {
+			$hue += 360;
+		}
+		$old_hue = $hue;
+		
+		$lightness = (($cmax + $cmin) / 2) * 100;
+		$old_lightness = $lightness = round($lightness);
+		$saturation = 100;
+		
+		if (($old_hue >= 25 && $old_hue <= 195) || $old_hue >= 295) {
+			$lightness = 10;
+		} elseif (($old_hue >= 285 && $old_hue < 295) || ($old_hue > 195 && $old_hue <= 205)) {
+			$hue = 60;
+			$lightness = 50;
+		} else {
+			$lightness = 95;
+		}
+		
+		if (($old_hue >= 295 || ($old_hue > 20 && $old_hue < 200)) && $old_lightness <= 35) {
+			$lightness = 95;
+		} elseif ((($old_hue < 25 ||$old_hue > 275) && $old_lightness >= 60) || ($old_hue > 195 && $old_lightness >= 70)) {
+			$lightness = 10;
+		}
+		
+		//return 'hsl(' . round($hue) . ',' . $saturation . '%,' . $lightness . '%)';
+		return (int)(((int)($hue * 65535)) + ((int)($saturation * 255)) + ((int)$lightness));
+	}
+	
+	function union2bytes($a, $b) {
+		return ($a << 8) | $b;
+	}
+	
+	function union4bytes($a, $b, $c, $d) {
+		$result = 0;
+		
+		$result = $d;
+		$result = $result << 8;
+		$result = $result | $c;
+		$result = $result << 8;
+		$result = $result | $b;
+		$result = $result << 8;
+		$result = $result | $a;
+		
+		return $result;		
+	}
+	
+	function bytes2float($a, $b, $c, $d) {
+		return (unpack('G*', hex2bin(dechex(union4bytes($a, $b, $c, $d))))[1]);
+	}
+
+	function generate_string($length=10, $count=1, $set='eng,num,rus,hex', $chars='', $sep='', $to_md5=false) {
 		$result = array();
 		$str_collection = array();
-		$accept = array('eng', 'num', 'rus', 'spc');
+		$accept = array('eng', 'num', 'rus', 'spc', 'hex');
 		$characters = array();
 		
 		$characters_eng = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
 		$characters_rus = 'абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ';
 		$characters_spc = '!@#$%^&*()_+=-~`\'"<>?/|\\';
+		$characters_hex = '0123456789abcdef';
 		$characters_num = '0123456789';
 		
 		$characters_set = explode(',', $set);
@@ -232,7 +320,7 @@
 
 		} else if ($time_diff >= 3600 && $time_diff < 86400) {
 			$hour = floor($time_diff / 3600);
-			$min = floor($time_diff / 60 % 60);
+			$min = floor(floor($time_diff / 60) % 60);
 			$sec = floor($time_diff % 60);
 
 			$result[] = $hour . ' ' . true_wordform($hour, 'час', 'часа', 'часов');
@@ -243,8 +331,8 @@
 			$result[] = ' назад';
 		} else if ($time_diff >= 86400 && $time_diff < 31536000) { //172800
 			$days = floor($time_diff / 86400);
-			$hour = floor($time_diff % 86400 / 3600);
-			$min = floor($time_diff / 60 % 60);
+			$hour = floor(floor($time_diff % 86400) / 3600);
+			$min = floor(floor($time_diff / 60) % 60);
 			$sec = floor($time_diff % 60);
 			
 			$result[] = $days . ' ' . true_wordform($days, 'день', 'дня', 'дней');
@@ -263,6 +351,16 @@
 		}
 		
 		return implode(' ', $result);
+	}
+	
+	function get_age($bdate) {
+		if (!empty($bdate) && $bdate != 0) {
+			$time_diff = date( 'Ymd' ) - date( 'Ymd', $bdate );
+			$age = substr($time_diff, 0, -4);
+			return sprintf('%d %s', $age, true_wordform($age, 'год', 'года', 'лет'));
+		} else {
+			return '';
+		}
 	}
 	
 	function parse_wget_log($file) {
@@ -490,28 +588,26 @@
 		return in_array($input, $strings) ? $input : $strings[0];
 	}
 	
-	function __http_request($url, $post_data=null, $addheaders=array(), $response_headers=false) {
+	function __http_request($url, $post_data=null, $proxy=NULL, $addheaders=array()) {
 		$ch = curl_init();
 		$result = array();
 		
+		$proxy_types_map = array(
+			'HTTP'		=> CURLPROXY_HTTP,
+			'HTTPS'		=> CURLPROXY_HTTPS,
+			'SOCKS4'	=> CURLPROXY_SOCKS4,
+			'SOCKS4A'	=> CURLPROXY_SOCKS4A,
+			'SOCKS5'	=> CURLPROXY_SOCKS5,
+		);
+		
 		$headers = array(
-			'Accept-Language: ru-RU,ru;q=0.9',
-			'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36',
-			'Accept-Encodig: gzip, deflate, br',
-			'cache-control: no-cache',
-			//':method: GET',
-			//':path: /',
-			//':scheme: https',
 			'accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-			//'dnt: 1',
-			//'pragma: no-cache',
-			//'sec-ch-ua-mobile: ?0',
-			//'sec-ch-ua-platform: "Windows"',
-			//'sec-fetch-dest: document',
-			//'sec-fetch-mode: navigate',
-			//'sec-fetch-site: same-origin',
-			//'sec-fetch-user: ?1',
-			//'upgrade-insecure-requests: 1'
+			//'accept-encoding: gzip, deflate, br',
+			'accept-language: ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+			'cache-control: no-cache',
+			'dnt: 1',
+			'pragma: no-cache',
+			'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36',
 		);
 		
 		$headers = array_merge($headers, $addheaders);
@@ -528,22 +624,26 @@
 			curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
 		}
 		curl_setopt($ch, CURLOPT_COOKIESESSION, true);
-		//curl_setopt($ch, CURLOPT_COOKIE, DOCROOT . 'tmp/cookies.txt');
 		curl_setopt($ch, CURLOPT_COOKIEFILE, DOCROOT . 'tmp/cookies.txt');
 		curl_setopt($ch, CURLOPT_COOKIEJAR, DOCROOT . 'tmp/cookies.txt');
 		
+		if ($proxy) {
+			list ($proxy_type, $proxy_addr, $proxy_port) = explode(':', $proxy);
+			curl_setopt($ch, CURLOPT_PROXY, $proxy_addr);
+			curl_setopt($ch, CURLOPT_PROXYPORT, $proxy_port);
+			curl_setopt($ch, CURLOPT_PROXYTYPE, $proxy_types_map[$proxy_type]);
+			curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+		}
+		
 		try {
-			if ($response_headers) {
-				$result[] = implode(PHP_EOL, curl_getinfo($ch));
-			}
-			$result[] = curl_exec($ch);
+			$result = curl_exec($ch);
 		} catch (Exception $e) {
 			echo $e -> getMessage();
 			echo (curl_error($ch));
 		}
 		curl_close($ch);
 
-		return (!empty($result)) ? implode('', $result) : false;		
+		return (!empty($result)) ? $result : false;		
 	}
 	
 	function file_get_contents_parts($file, $save_path, $chunk_size=1048576, $callback=null, $param='') {
@@ -589,6 +689,16 @@
 	
 	function if_array_exists($array, $value, $default='') {
 		return isset($array[$value]) ? !empty($array[$value]) ? $array[$value] : $default : $default;
+	}
+	
+	function date_to_time($date) {
+		if (!empty($date) && $date != 0) {
+			$date = ($date) ? explode('.', $date) : NULL;
+			$date = (is_array($date) && count($date) == 3) ? mktime(0, 0, 0, $date[1], $date[0], $date[2]) : NULL;
+		} else {
+			$date = 0;
+		}
+		return $date;
 	}
 	
 	function send_404() {
